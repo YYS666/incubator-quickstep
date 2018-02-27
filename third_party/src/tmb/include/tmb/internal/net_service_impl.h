@@ -74,6 +74,11 @@ class NetServiceImpl : public net::MessageBus::Service {
       const net::ReceiveRequest *request,
       grpc::ServerWriter<net::AnnotatedTmbMessage> *writer) override;
 
+  grpc::Status ReceiveIfAvailable(
+      grpc::ServerContext *context,
+      const net::ReceiveRequest *request,
+      grpc::ServerWriter<net::AnnotatedTmbMessage> *writer) override;
+
   grpc::Status Delete(grpc::ServerContext *context,
                       const net::DeleteOrCancelRequest *request,
                       net::EmptyMessage *response) override;

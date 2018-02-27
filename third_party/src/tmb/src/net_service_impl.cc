@@ -189,6 +189,37 @@ grpc::Status NetServiceImpl::Receive(
     const net::ReceiveRequest *request,
     grpc::ServerWriter<net::AnnotatedTmbMessage> *writer) {
   std::vector<AnnotatedMessage> messages;
+  internal_bus_->ReceiveBatch(request->receiver(),
+                                         &messages,
+                                         request->minimum_priority(),
+                                         request->maximum_messages(),
+                                         request->delete_immediately());
+
+  for (const AnnotatedMessage &msg : messages) {
+    // TODO(chasseur): Look into hacks to avoid deep copy of message body.
+    net::AnnotatedTmbMessage msg_proto;
+    msg_proto.mutable_tagged_message()->set_message_type(
+        msg.tagged_message.message_type());
+    msg_proto.mutable_tagged_message()->set_message_body(
+        msg.tagged_message.message(),
+        msg.tagged_message.message_bytes());
+    msg_proto.set_sender(msg.sender);
+    msg_proto.set_send_time(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            msg.send_time.time_since_epoch()).count());
+    msg_proto.set_message_id(msg.deletion_token.message_id);
+
+    writer->Write(msg_proto);
+  }
+
+  return grpc::Status::OK;
+}
+
+grpc::Status NetServiceImpl::ReceiveIfAvailable(
+    grpc::ServerContext *context,
+    const net::ReceiveRequest *request,
+    grpc::ServerWriter<net::AnnotatedTmbMessage> *writer) {
+  std::vector<AnnotatedMessage> messages;
   internal_bus_->ReceiveBatchIfAvailable(request->receiver(),
                                          &messages,
                                          request->minimum_priority(),

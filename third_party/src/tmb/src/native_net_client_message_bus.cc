@@ -237,6 +237,47 @@ std::size_t NativeNetClientMessageBus::ReceiveIfAvailableImpl(
   grpc::ClientContext context;
 
   std::unique_ptr<grpc::ClientReader<internal::net::AnnotatedTmbMessage>>
+      reader(stub_->ReceiveIfAvailable(&context, request));
+  std::size_t num_received = 0;
+  while (reader->Read(&msg_proto)) {
+    assert(msg_proto.has_tagged_message());
+    ++num_received;
+
+    AnnotatedMessage msg;
+    msg.sender = msg_proto.sender();
+    msg.send_time
+        = std::chrono::time_point<std::chrono::high_resolution_clock>(
+            std::chrono::nanoseconds(msg_proto.send_time()));
+    msg.deletion_token.message_id = msg_proto.message_id();
+    msg.tagged_message.set_message(
+        msg_proto.tagged_message().message_body().c_str(),
+        msg_proto.tagged_message().message_body().size(),
+        msg_proto.tagged_message().message_type());
+
+    pusher->Push(std::move(msg));
+  }
+  grpc::Status status = reader->Finish();
+  assert(status.ok());
+
+  return num_received;
+}
+
+std::size_t NativeNetClientMessageBus::ReceiveImpl(
+    const client_id receiver_id,
+    const Priority minimum_priority,
+    const std::size_t max_messages,
+    const bool delete_immediately,
+    internal::ContainerPusher *pusher) {
+  internal::net::ReceiveRequest request;
+  request.set_receiver(receiver_id);
+  request.set_minimum_priority(minimum_priority);
+  request.set_maximum_messages(max_messages);
+  request.set_delete_immediately(delete_immediately);
+
+  internal::net::AnnotatedTmbMessage msg_proto;
+  grpc::ClientContext context;
+
+  std::unique_ptr<grpc::ClientReader<internal::net::AnnotatedTmbMessage>>
       reader(stub_->Receive(&context, request));
   std::size_t num_received = 0;
   while (reader->Read(&msg_proto)) {

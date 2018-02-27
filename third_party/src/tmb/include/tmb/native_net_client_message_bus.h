@@ -98,6 +98,13 @@ class NativeNetClientMessageBus : public MessageBus {
                                      internal::ContainerPusher *pusher)
                                          override;
 
+  std::size_t ReceiveImpl(const client_id receiver_id,
+                                     const Priority minimum_priority,
+                                     const std::size_t max_messages,
+                                     const bool delete_immediately,
+                                     internal::ContainerPusher *pusher)
+                                         override;
+
   void DeleteImpl(const client_id receiver_id,
                   internal::IteratorAdapter<const AnnotatedMessage> *adapter)
                       override;
