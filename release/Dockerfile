@@ -30,8 +30,10 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get -y install \
   software-properties-common \
   wget \
   vim \
-  tmux \
-  sudo
+  libgflags-dev \
+  libgoogle-glog-dev \
+  libpthread-stubs0-dev \
+  libgoogle-perftools-dev
 
 RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-${LLVM_VERSION} 100
 RUN update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-${LLVM_VERSION} 100
