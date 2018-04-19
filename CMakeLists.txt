@@ -765,6 +765,7 @@ target_link_libraries(quickstep_cli_shell
                       quickstep_storage_StorageManager
                       quickstep_threading_ThreadIDBasedMap
                       quickstep_utility_ExecutionDAGVisualizer
+                      quickstep_utility_EventProfiler
                       quickstep_utility_Macros
                       quickstep_utility_PtrVector
                       quickstep_utility_ScopedReassignment
