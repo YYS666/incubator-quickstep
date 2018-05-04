@@ -25,8 +25,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>  // for tmb bench only
 #include <memory>
 #include <string>
+#include <thread>  // for tmb bench only
+#include <unordered_map>  // for tmb bench only
 #include <utility>
 
 #include "grpc++/client_context.h"
@@ -45,8 +48,11 @@
 
 #include "tmb/internal/container_pusher.h"
 #include "tmb/internal/iterator_adapter.h"
+#include "tmb/internal/queued_message.h"   // for tmb bench only
+#include "tmb/internal/rcu.h"   // for tmb bench only
 #include "tmb/internal/tmb_net.grpc.pb.h"
 #include "tmb/internal/tmb_net.pb.h"
+#include "tmb/internal/tree_receiver_message_queue.h"   // for tmb bench only
 
 namespace tmb {
 
@@ -82,10 +88,29 @@ client_id NativeNetClientMessageBus::Connect() {
   grpc::Status status = stub_->Connect(&context, request, &response);
   assert(status.ok());
 
+  typename IncomingQueues::WriteHandle queue_handle = 
+               incoming_queues_.GetWriteHandle();
+  queue_handle->emplace(response.client(), 
+                       std::shared_ptr<internal::TreeReceiverMessageQueue<false>>(
+                           new internal::TreeReceiverMessageQueue<false>()));
+  queue_handle.Commit();
+
+  typename MessageChatters::WriteHandle chatter_handle = 
+               message_chatters_.GetWriteHandle();
+  chatter_handle->emplace(response.client(),
+                          std::shared_ptr<std::thread>(
+                          new std::thread(&NativeNetClientMessageBus::MessageChat, 
+                                          this,
+                                          response.client())));
+  chatter_handle.Commit();
+
   return response.client();
 }
 
 bool NativeNetClientMessageBus::Disconnect(const client_id client) {
+
+  std::cout << "Disconnect: " <<client<< std::endl;
+  StopMessageChat(client);
   internal::net::DisconnectRequest request;
   request.set_client(client);
 
@@ -227,39 +252,14 @@ std::size_t NativeNetClientMessageBus::ReceiveIfAvailableImpl(
     const std::size_t max_messages,
     const bool delete_immediately,
     internal::ContainerPusher *pusher) {
-  internal::net::ReceiveRequest request;
-  request.set_receiver(receiver_id);
-  request.set_minimum_priority(minimum_priority);
-  request.set_maximum_messages(max_messages);
-  request.set_delete_immediately(delete_immediately);
-
-  internal::net::AnnotatedTmbMessage msg_proto;
-  grpc::ClientContext context;
-
-  std::unique_ptr<grpc::ClientReader<internal::net::AnnotatedTmbMessage>>
-      reader(stub_->ReceiveIfAvailable(&context, request));
-  std::size_t num_received = 0;
-  while (reader->Read(&msg_proto)) {
-    assert(msg_proto.has_tagged_message());
-    ++num_received;
-
-    AnnotatedMessage msg;
-    msg.sender = msg_proto.sender();
-    msg.send_time
-        = std::chrono::time_point<std::chrono::high_resolution_clock>(
-            std::chrono::nanoseconds(msg_proto.send_time()));
-    msg.deletion_token.message_id = msg_proto.message_id();
-    msg.tagged_message.set_message(
-        msg_proto.tagged_message().message_body().c_str(),
-        msg_proto.tagged_message().message_body().size(),
-        msg_proto.tagged_message().message_type());
-
-    pusher->Push(std::move(msg));
-  }
-  grpc::Status status = reader->Finish();
-  assert(status.ok());
-
-  return num_received;
+  typename IncomingQueues::ReadHandle handle = incoming_queues_.GetReadHandle();
+  internal::TreeReceiverMessageQueue<false>* queue = handle->find(receiver_id)->second.get();
+  return queue->PopIfAvailable(
+      minimum_priority,
+      max_messages,
+      delete_immediately,
+      pusher,
+      nullptr);
 }
 
 std::size_t NativeNetClientMessageBus::ReceiveImpl(
@@ -268,39 +268,16 @@ std::size_t NativeNetClientMessageBus::ReceiveImpl(
     const std::size_t max_messages,
     const bool delete_immediately,
     internal::ContainerPusher *pusher) {
-  internal::net::ReceiveRequest request;
-  request.set_receiver(receiver_id);
-  request.set_minimum_priority(minimum_priority);
-  request.set_maximum_messages(max_messages);
-  request.set_delete_immediately(delete_immediately);
 
-  internal::net::AnnotatedTmbMessage msg_proto;
-  grpc::ClientContext context;
-
-  std::unique_ptr<grpc::ClientReader<internal::net::AnnotatedTmbMessage>>
-      reader(stub_->Receive(&context, request));
-  std::size_t num_received = 0;
-  while (reader->Read(&msg_proto)) {
-    assert(msg_proto.has_tagged_message());
-    ++num_received;
-
-    AnnotatedMessage msg;
-    msg.sender = msg_proto.sender();
-    msg.send_time
-        = std::chrono::time_point<std::chrono::high_resolution_clock>(
-            std::chrono::nanoseconds(msg_proto.send_time()));
-    msg.deletion_token.message_id = msg_proto.message_id();
-    msg.tagged_message.set_message(
-        msg_proto.tagged_message().message_body().c_str(),
-        msg_proto.tagged_message().message_body().size(),
-        msg_proto.tagged_message().message_type());
-
-    pusher->Push(std::move(msg));
-  }
-  grpc::Status status = reader->Finish();
-  assert(status.ok());
-
-  return num_received;
+  typename IncomingQueues::ReadHandle handle = incoming_queues_.GetReadHandle();
+  internal::TreeReceiverMessageQueue<false>* queue = handle->find(receiver_id)->second.get();
+  std::cout<< "queue length: " << queue->Length()<<std::endl;
+  return queue->Pop(
+      minimum_priority,
+      max_messages,
+      delete_immediately,
+      pusher,
+      nullptr);
 }
 
 void NativeNetClientMessageBus::DeleteImpl(
@@ -336,5 +313,91 @@ void NativeNetClientMessageBus::CancelImpl(
   grpc::Status status = stub_->ReceiverCancel(&context, request, &response);
   assert(status.ok());
 }
+
+void NativeNetClientMessageBus::MessageChat(
+    const client_id receiver_id) {
+  std::cout<<"client: "<<receiver_id<<std::endl;
+
+  grpc::ClientContext context;
+  std::unique_ptr<grpc::ClientReaderWriter<internal::net::ReceiveRequest,
+                                           internal::net::AnnotatedTmbMessage>>
+      stream(stub_->MessageChat(&context));
+
+  internal::net::ReceiveRequest request;
+  request.set_receiver(receiver_id);
+  request.set_minimum_priority(0);
+  request.set_maximum_messages(0);
+  request.set_delete_immediately(true);
+  stream->Write(request);
+  stream->WritesDone();
+  std::size_t num_message = 0;
+  internal::net::AnnotatedTmbMessage msg_proto;
+  while (stream->Read(&msg_proto)) {
+    client_id sender = msg_proto.sender();
+    // Set 0 for now
+    Priority priority = 0;
+    std::chrono::time_point<std::chrono::high_resolution_clock> send_time
+      = std::chrono::time_point<std::chrono::high_resolution_clock>(
+          std::chrono::nanoseconds(msg_proto.send_time()));
+    MessageStyle single_receiver_style;
+    internal::SharedBool cancel_flag;
+    TaggedMessage message;
+    message.set_message(
+        msg_proto.tagged_message().message_body().c_str(),
+        msg_proto.tagged_message().message_body().size(),
+        msg_proto.tagged_message().message_type());
+    tmb::internal::QueuedMessage queued_message(sender,
+                                                priority,
+                                                send_time,
+                                                single_receiver_style.expiration_time_,
+                                                cancel_flag,
+                                                std::move(message));
+    queued_message.SetMessageID(msg_proto.message_id());
+    typename IncomingQueues::ReadHandle handle = incoming_queues_.GetReadHandle();
+    internal::TreeReceiverMessageQueue<false>* queue = handle->find(receiver_id)->second.get();
+    queue->Push(std::move(queued_message));
+    handle.release();
+    num_message++;
+  }
+  std::cout <<"finishing chat:"<<receiver_id <<std::endl;
+  grpc::Status status = stream->Finish();
+  assert(status.ok());
+}
+
+void NativeNetClientMessageBus::StopMessageChat(
+    const client_id client) {
+  std::cout << "stop chat client: " <<client<< std::endl;
+
+  internal::net::DisconnectRequest request;
+  request.set_client(client);
+
+  internal::net::BoolStatus response;
+  grpc::ClientContext context;
+
+  grpc::Status status = stub_->StopMessageChat(&context, request, &response);
+  assert(status.ok());
+
+
+  typename MessageChatters::WriteHandle chatter_handle =
+               message_chatters_.GetWriteHandle();
+  typename MessageChatters::value_type::iterator chatter_it =
+               chatter_handle->find(client);
+  assert(chatter_it != chatter_handle->end());
+  chatter_it->second->join();
+  chatter_handle->erase(chatter_it);
+  chatter_handle.Commit();
+  std::cout<<"chatter joined: "<< client <<std::endl;
+
+  typename IncomingQueues::WriteHandle queue_handle = 
+               incoming_queues_.GetWriteHandle();
+  typename IncomingQueues::value_type::iterator queue_it = 
+               queue_handle->find(client);
+  assert(queue_it != queue_handle->end());
+  queue_handle->erase(queue_it), 
+  queue_handle.Commit();
+  std::cout<<"queue erased: "<< client <<std::endl;
+
+  assert(response.status());
+} 
 
 }  // namespace tmb

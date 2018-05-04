@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>  // for tmb bench only
 #include <random>
 #include <vector>
 
@@ -51,7 +52,7 @@ void SenderThread::Run() {
   tmb::MessageStyle style;
   void *message_buffer = std::malloc(message_bytes_);
   std::memset(message_buffer, 0, message_bytes_);
-
+  std::chrono::duration<double> send_time;
   // Use a fast subtract-with-carry engine to randomly choose receiver
   // addresses. Use the output of a hardware RNG (if available) as seed.
   std::random_device hw_rand;
@@ -85,13 +86,23 @@ void SenderThread::Run() {
     *static_cast<std::size_t*>(message_buffer) = sent_;
     tmb::TaggedMessage message(message_buffer, message_bytes_, 0);
 
+    std::chrono::time_point<std::chrono::high_resolution_clock> send_start
+      = std::chrono::high_resolution_clock::now();
+    //std::this_thread::sleep_for(std::chrono::seconds(1));
     message_bus_->Send(me_, address, style, std::move(message));
+    std::chrono::time_point<std::chrono::high_resolution_clock> send_end
+      = std::chrono::high_resolution_clock::now();
+    //std::chrono::duration<double> single_send_call = send_end - send_start;
+    //std::cout<<"time spent on single send: "<< static_cast<double>((single_send_call).count())<<std::endl;
+    send_time += send_end - send_start;
+
     ++sent_;
+    //std::cout<<"num msg sent: " <<sent_<<std::endl;
   }
   std::chrono::time_point<std::chrono::high_resolution_clock> end
       = std::chrono::high_resolution_clock::now();
   elapsed_ = end - start;
-
+  std::cout<<"time spent on send: "<< static_cast<double>(send_time.count())<<std::endl;
   // Disconnect.
   message_bus_->Disconnect(me_);
   std::free(message_buffer);

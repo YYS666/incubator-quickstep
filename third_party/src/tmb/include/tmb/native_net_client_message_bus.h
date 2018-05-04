@@ -24,13 +24,17 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <thread>    // for tmb bench only
+#include <unordered_map>   // for tmb bench only
 
 #include "tmb/id_typedefs.h"
 #include "tmb/message_bus.h"
 #include "tmb/priority.h"
 #include "tmb/tagged_message.h"
 
+#include "tmb/internal/rcu.h"  // For tmb bench only
 #include "tmb/internal/tmb_net.grpc.pb.h"
+#include "tmb/internal/tree_receiver_message_queue.h"   // For tmb bench only
 
 namespace tmb {
 
@@ -53,7 +57,14 @@ class MessageStyle;
  **/
 class NativeNetClientMessageBus : public MessageBus {
  public:
-  NativeNetClientMessageBus() {
+  NativeNetClientMessageBus() 
+      : incoming_queues_(new std::unordered_map<
+                             client_id,
+                             std::shared_ptr<
+                                 internal::TreeReceiverMessageQueue<false>>>), 
+        message_chatters_(new std::unordered_map<
+                              client_id,
+                              std::shared_ptr<std::thread>>) {
   }
 
   ~NativeNetClientMessageBus() override {
@@ -91,14 +102,14 @@ class NativeNetClientMessageBus : public MessageBus {
       override;
 
  protected:
-  std::size_t ReceiveIfAvailableImpl(const client_id receiver_id,
-                                     const Priority minimum_priority,
-                                     const std::size_t max_messages,
-                                     const bool delete_immediately,
-                                     internal::ContainerPusher *pusher)
-                                         override;
-
   std::size_t ReceiveImpl(const client_id receiver_id,
+                           const Priority minimum_priority,
+                           const std::size_t max_messages,
+                           const bool delete_immediately,
+                           internal::ContainerPusher *pusher)
+                               override;
+
+  std::size_t ReceiveIfAvailableImpl(const client_id receiver_id,
                                      const Priority minimum_priority,
                                      const std::size_t max_messages,
                                      const bool delete_immediately,
@@ -114,8 +125,29 @@ class NativeNetClientMessageBus : public MessageBus {
                       override;
 
  private:
+  void MessageChat(const client_id receiver_id);
+
+  void StopMessageChat(const client_id receiver_id);
+
   std::string server_address_;
   std::shared_ptr<internal::net::MessageBus::Stub> stub_;
+
+  // since one native net client need to handle several client, we need a unordered_map
+  // to remember is in use
+  typedef internal::RCU<
+              std::unordered_map<
+                  client_id, 
+                  std::shared_ptr<internal::TreeReceiverMessageQueue<false>>>>
+          IncomingQueues;
+
+  typedef internal::RCU<
+              std::unordered_map<
+                  client_id,
+                  std::shared_ptr<std::thread>>>
+          MessageChatters;
+
+  IncomingQueues incoming_queues_;
+  MessageChatters message_chatters_;
 
   // Disallow copy and assign:
   NativeNetClientMessageBus(const NativeNetClientMessageBus &orig) = delete;

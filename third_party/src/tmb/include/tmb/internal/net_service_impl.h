@@ -27,9 +27,11 @@
 #include "grpc++/support/sync_stream.h"
 
 #include "tmb/message_bus.h"
+#include "tmb/id_typedefs.h"  //For tmb_bench only
 
 #include "tmb/internal/tmb_net.grpc.pb.h"
 #include "tmb/internal/tmb_net.pb.h"
+#include "tmb/internal/threadsafe_set.h"  //For tmb_bench only
 
 namespace tmb {
 namespace internal {
@@ -74,11 +76,6 @@ class NetServiceImpl : public net::MessageBus::Service {
       const net::ReceiveRequest *request,
       grpc::ServerWriter<net::AnnotatedTmbMessage> *writer) override;
 
-  grpc::Status ReceiveIfAvailable(
-      grpc::ServerContext *context,
-      const net::ReceiveRequest *request,
-      grpc::ServerWriter<net::AnnotatedTmbMessage> *writer) override;
-
   grpc::Status Delete(grpc::ServerContext *context,
                       const net::DeleteOrCancelRequest *request,
                       net::EmptyMessage *response) override;
@@ -96,8 +93,20 @@ class NetServiceImpl : public net::MessageBus::Service {
       const net::CountQueuedMessagesRequest *request,
       net::CountQueuedMessagesResponse *response) override;
 
+  grpc::Status MessageChat(
+      grpc::ServerContext *context,
+      grpc::ServerReaderWriter<net::AnnotatedTmbMessage, net::ReceiveRequest> *stream) override;
+
+  grpc::Status StopMessageChat(
+      grpc::ServerContext *context,
+      const net::DisconnectRequest *request,
+      net::BoolStatus *response) override;
+
  private:
   std::unique_ptr<MessageBus> internal_bus_;
+
+  // Record the client that have message chatter
+  std::unique_ptr<ThreadsafeSet<client_id>> message_chatter_;
 };
 
 }  // namespace internal

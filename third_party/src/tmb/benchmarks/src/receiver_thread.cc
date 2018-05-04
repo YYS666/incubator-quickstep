@@ -19,6 +19,7 @@
 
 #include <chrono>  // NOLINT(build/c++11)
 #include <cstddef>
+#include <iostream>   // for tmb bench only
 #include <vector>
 
 #include "tmb/id_typedefs.h"
@@ -42,14 +43,27 @@ template <bool delete_immediately>
 void ReceiverThread<delete_immediately>::Run() {
   std::vector<tmb::AnnotatedMessage> received_batch;
   bool running = true;
+  std::chrono::duration<double> receive_time;
   std::chrono::time_point<std::chrono::high_resolution_clock> start
       = std::chrono::high_resolution_clock::now();
   while (running) {
+
+    std::chrono::time_point<std::chrono::high_resolution_clock> receive_start
+        = std::chrono::high_resolution_clock::now();
     received_ += message_bus_->ReceiveBatch(me_,
                                             &received_batch,
                                             0,
                                             0,
                                             delete_immediately);
+
+    std::chrono::time_point<std::chrono::high_resolution_clock> receive_end
+        = std::chrono::high_resolution_clock::now();
+
+    //std::chrono::duration<double> single_receive_time = receive_end - receive_start;
+    //std::cout<< "single receive time: " <<static_cast<double>(single_receive_time.count())<<std::endl;
+
+    receive_time += receive_end - receive_start;
+
     for (const tmb::AnnotatedMessage &received : received_batch) {
       if ((received.tagged_message.message_type() == 1)
           && (received.tagged_message.message_bytes() == sizeof(size_t))
@@ -69,6 +83,7 @@ void ReceiverThread<delete_immediately>::Run() {
   std::chrono::time_point<std::chrono::high_resolution_clock> end
       = std::chrono::high_resolution_clock::now();
   elapsed_ = end - start;
+  std::cout<< "total receive time: " <<static_cast<double>(receive_time.count())<<std::endl;
 
   // Disconnect.
   message_bus_->Disconnect(me_);

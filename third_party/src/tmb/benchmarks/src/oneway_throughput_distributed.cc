@@ -45,6 +45,7 @@ int main(int argc, char *argv[]) {
   }
 
   tmb::client_id control_thread_id = message_bus->Connect();
+  //message_bus->Disconnect(control_thread_id);
   message_bus->RegisterClientAsReceiver(control_thread_id, 2);
   message_bus->RegisterClientAsReceiver(control_thread_id, 3);
   message_bus->RegisterClientAsSender(control_thread_id, 3);

@@ -20,7 +20,9 @@
 #include <cassert>
 #include <chrono>  // NOLINT(build/c++11)
 #include <cstdint>
+#include <iostream>  // for tmb bench only
 #include <string>
+#include <thread>   // for tmb bench only
 #include <utility>
 #include <vector>
 
@@ -31,6 +33,7 @@
 
 #include "tmb/address.h"
 #include "tmb/cancellation_token.h"
+#include "tmb/id_typedefs.h"  // For tmb_bench only
 #include "tmb/message_bus.h"
 #include "tmb/message_style.h"
 #include "tmb/tagged_message.h"
@@ -38,6 +41,7 @@
 #include "tmb/internal/net_message_removal_interface.h"
 #include "tmb/internal/tmb_net.grpc.pb.h"
 #include "tmb/internal/tmb_net.pb.h"
+#include "tmb/internal/threadsafe_set.h"
 
 namespace tmb {
 namespace internal {
@@ -62,6 +66,7 @@ inline std::vector<std::int64_t> GetMessageIdVector(
 
 NetServiceImpl::NetServiceImpl(MessageBus *internal_bus)
     : internal_bus_(internal_bus) {
+  message_chatter_ = std::unique_ptr<ThreadsafeSet<client_id>>(new ThreadsafeSet<client_id>());
   assert(internal_bus_->SupportsNetMessageRemovalInterface());
 }
 
@@ -189,37 +194,6 @@ grpc::Status NetServiceImpl::Receive(
     const net::ReceiveRequest *request,
     grpc::ServerWriter<net::AnnotatedTmbMessage> *writer) {
   std::vector<AnnotatedMessage> messages;
-  internal_bus_->ReceiveBatch(request->receiver(),
-                                         &messages,
-                                         request->minimum_priority(),
-                                         request->maximum_messages(),
-                                         request->delete_immediately());
-
-  for (const AnnotatedMessage &msg : messages) {
-    // TODO(chasseur): Look into hacks to avoid deep copy of message body.
-    net::AnnotatedTmbMessage msg_proto;
-    msg_proto.mutable_tagged_message()->set_message_type(
-        msg.tagged_message.message_type());
-    msg_proto.mutable_tagged_message()->set_message_body(
-        msg.tagged_message.message(),
-        msg.tagged_message.message_bytes());
-    msg_proto.set_sender(msg.sender);
-    msg_proto.set_send_time(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            msg.send_time.time_since_epoch()).count());
-    msg_proto.set_message_id(msg.deletion_token.message_id);
-
-    writer->Write(msg_proto);
-  }
-
-  return grpc::Status::OK;
-}
-
-grpc::Status NetServiceImpl::ReceiveIfAvailable(
-    grpc::ServerContext *context,
-    const net::ReceiveRequest *request,
-    grpc::ServerWriter<net::AnnotatedTmbMessage> *writer) {
-  std::vector<AnnotatedMessage> messages;
   internal_bus_->ReceiveBatchIfAvailable(request->receiver(),
                                          &messages,
                                          request->minimum_priority(),
@@ -302,6 +276,101 @@ grpc::Status NetServiceImpl::CountQueuedMessages(
       internal_bus_->CountQueuedMessagesForClient(request->client()));
   return grpc::Status::OK;
 }
+
+grpc::Status NetServiceImpl::MessageChat(
+    grpc::ServerContext *context,
+    grpc::ServerReaderWriter<net::AnnotatedTmbMessage, net::ReceiveRequest> *stream) {
+  net::ReceiveRequest request;
+  if (stream->Read(&request)) {
+    message_chatter_->insert(request.receiver());
+  }
+  client_id receiver = request.receiver();
+  internal_bus_->RegisterClientAsSender(receiver,
+                                        kMessageTypeIdNone);
+  internal_bus_->RegisterClientAsReceiver(receiver,
+                                          kMessageTypeIdNone);
+  std::cout<< "successfully chatting" <<std::endl;
+  std::vector<AnnotatedMessage> messages;
+  while (message_chatter_->contains(receiver)) {
+    internal_bus_->ReceiveBatch(receiver,
+                                &messages,
+                                request.minimum_priority(),
+                                request.maximum_messages(),
+                                request.delete_immediately());
+    
+    for (const AnnotatedMessage &msg : messages) {
+      net::AnnotatedTmbMessage msg_proto;
+      msg_proto.mutable_tagged_message()->set_message_type(
+          msg.tagged_message.message_type());
+      msg_proto.mutable_tagged_message()->set_message_body(
+          msg.tagged_message.message(),
+          msg.tagged_message.message_bytes());
+      msg_proto.set_sender(msg.sender);
+      msg_proto.set_send_time(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              msg.send_time.time_since_epoch()).count());
+      msg_proto.set_message_id(msg.deletion_token.message_id);
+
+      if (msg.tagged_message.message_type() == kMessageTypeIdNone
+          && msg.sender == receiver) {
+        break;
+      }
+
+      stream->Write(msg_proto);
+    }
+    messages.clear();
+  }
+  std::cout<< "finish chat" <<std::endl;
+  return grpc::Status::OK;
+}
+
+grpc::Status NetServiceImpl::StopMessageChat(
+    grpc::ServerContext *context,
+    const net::DisconnectRequest *request,
+    net::BoolStatus *response) {
+  message_chatter_->erase(request->client());
+
+  Address address;
+  address.AddRecipient(request->client());
+
+  MessageStyle style;
+
+  void *message_buffer = std::malloc(8);
+  std::memset(message_buffer, 0, 8);
+
+  TaggedMessage msg(message_buffer, 8, kMessageTypeIdNone);
+
+  MessageBus::SendStatus status = internal_bus_->Send(
+      request->client(),
+      address,
+      style,
+      std::move(msg),
+      0,
+      nullptr);
+
+  switch (status) {
+    case MessageBus::SendStatus::kOK: {
+      response->set_status(true);
+      break;
+    }
+    case MessageBus::SendStatus::kNoReceivers:
+      response->set_status(false);
+      break;
+    case MessageBus::SendStatus::kSenderNotConnected:
+      response->set_status(false);
+      break;
+    case MessageBus::SendStatus::kSenderNotRegisteredForMessageType:
+      response->set_status(false);
+      break;
+    case MessageBus::SendStatus::kReceiverNotRegisteredForMessageType:
+      response->set_status(false);
+      break;
+    default:
+      return grpc::Status(grpc::INTERNAL,
+                          "Unrecognized MessageBus::SendStatus code.");
+  }
+  return grpc::Status::OK;
+} 
 
 }  // namespace internal
 }  // namespace tmb
